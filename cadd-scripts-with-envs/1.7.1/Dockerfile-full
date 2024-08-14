@@ -1,0 +1,80 @@
+FROM debian:bookworm
+
+ARG CADD_VERSION=1.7.1
+
+LABEL software="cadd-scripts-with-envs" \
+    software.version="$CADD_VERSION" \
+    version="1" \
+    about.summary="CADD is a tool for scoring the deleteriousness of single nucleotide variants as well as insertion/deletions variants in the human genome" \
+    about.home="https://cadd.gs.washington.edu/" \
+    about.documentation="https://github.com/BioContainers/containers/blob/master/cadd-scripts-with-envs/$CADD_VERSION/README.md" \
+    about.license="Custom License" \
+    about.license_file="https://github.com/kircherlab/CADD-scripts/blob/v$CADD_VERSION/LICENSE" \
+    extra.binaries="/opt/conda/bin/cadd.sh" \
+    about.tags="Genomics, Human geneitcs" \
+    base_image="debian:bookworm"
+
+# Install 
+# - ps command
+# - curl, for use in this dockerfile
+# - git, for use in conda env creation
+RUN apt-get update && \
+        apt-get install -y procps curl git g++ libz-dev && \
+        apt-get clean && \
+        apt-get purge && \
+        rm -rf /var/lib/apt/lists/* /tmp/*
+
+# Add CADD directory (CADD.sh) and conda to the path
+ENV PATH=/opt/CADD-scripts-${CADD_VERSION}:/opt/mambaforge/bin:$PATH
+
+# Install mamba
+RUN curl -O -L "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh" && \
+        bash Miniforge3-$(uname)-$(uname -m).sh -b -p /opt/mambaforge
+
+# Configure conda strict priority (required by Snakemake)
+RUN conda config --system --set channel_priority strict
+
+RUN mamba upgrade -y mamba 'python=3.12'
+
+# Install snakemake and mamba. mamba is required by snakemake (as it provides the conda command).
+RUN mamba install -y -c conda-forge -c bioconda -n base 'snakemake=8' && \
+        mamba clean --all --yes
+
+# Download and untar CADD from github.
+RUN cd /opt && \
+    curl -L https://github.com/kircherlab/CADD-scripts/archive/refs/tags/v${CADD_VERSION}.tar.gz | tar xz && \
+    cd CADD-scripts-${CADD_VERSION}
+
+# Add CADD directory (CADD.sh) and conda to the path
+ENV PATH=/opt/CADD-scripts-${CADD_VERSION}:/opt/conda/bin:/opt/conda/condabin:$PATH
+
+# Run snakemake to include the necessary conda environments inside the container
+# The following doesn't generate all the environments as it doesn't run the full DAG.
+# We create them manually instead, see below.
+#RUN cd /opt/CADD-scripts-${CADD_VERSION} && \
+#	CADD=/opt/CADD-scripts-${CADD_VERSION} snakemake test/input.tsv.gz \
+#            --use-conda --conda-create-envs-only --conda-prefix envs/conda \
+#            --configfile config/config_GRCh38_v1.7_noanno.yml \
+#            --snakefile Snakefile -c 1
+
+# Enable libxcrypt package, which is necessary for successful build
+#RUN printf "create_default_packages:\n    - libxcrypt\n" > $HOME/.condarc
+
+# Manually create the conda environments in a loop, to make sure that all environments are created.
+ENV CADD_CONDA_ENV_DIR=/opt/CADD-scripts-${CADD_VERSION}/envs/conda
+RUN set -e && for envm in /opt/CADD-scripts-${CADD_VERSION}/envs/*.yml; \
+        do \
+            echo "Building $envm" ; \
+            # Compute hash of absolute path to environments dir and contents of the env file.
+            export HASH=$( (echo -n $CADD_CONDA_ENV_DIR; cat $envm) | md5sum | cut -d ' ' -f 1 ); \
+            # Create conda env and also store a copy of the yml.
+            mamba env create -y -f $envm -p $CADD_CONDA_ENV_DIR/${HASH}_ ; \
+            cp $envm $CADD_CONDA_ENV_DIR/${HASH}_.yaml; \
+        done
+
+#TODO
+# 1. test image
+# 2. build image with micromamba and no tabix
+# 3. test image
+# 4. commit and PR
+
